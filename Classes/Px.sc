@@ -4,6 +4,7 @@ TODO: Classvar "seeds" should also be multiname
 
 Px {
     classvar <>chorusPatterns;
+    classvar <globalSeed;
     classvar <lastName;
     classvar <>lastFormattedPatterns;
     classvar <>lastPatterns;
@@ -34,11 +35,25 @@ Px {
 
         var createIds = {
             var indexDict = Dictionary.new;
+
+            var getInstrumentName = { |pattern|
+                var patternStr = pattern.i;
+
+                if (patternStr.isNil) {
+                    if (pattern.loop.notNil) { patternStr = "loop" };
+                    if (pattern.play.notNil) { patternStr = "play" };
+                };
+
+                patternStr.asString;
+            };
+
             patterns = patterns.collect { |pattern|
-                var patternStr = pattern.i.asString;
-                indexDict[patternStr] = indexDict[patternStr].isNil.if
-                { 0 }
-                { indexDict[patternStr] + 1 };
+                var patternStr = getInstrumentName.(pattern);
+
+                if (indexDict[patternStr].isNil)
+                { indexDict[patternStr] = 0 }
+                { indexDict[patternStr] = indexDict[patternStr] + 1 };
+
                 pattern = pattern ++ (id: pattern[\id] ?? (patternStr ++ "_" ++ indexDict[patternStr]));
                 pattern[\id] = pattern[\id].asSymbol;
             };
@@ -46,25 +61,31 @@ Px {
 
         var createPatternBeatRest = { |pattern|
             var dur = pattern[\dur];
+
             if (pattern[\rest].notNil) {
                 dur = Pseq([Pn(dur, 15), pattern[\rest] + dur], inf);
             };
+
             dur;
         };
 
         var createPatternBeat = { |amp, pattern|
             if (pattern[\beatSet].isNil) {
-                var seed = this.prGetPatternSeed(pattern);
                 var weight = pattern[\weight] ?? 0.7;
                 var rhythmWeight = (weight * 10).floor / 10;
                 var pseqWeight = weight - rhythmWeight * 10;
-                var rhythmSeq = { |weight|
+                var rhythmSeq;
+
+                thisThread.randSeed = this.prGetPatternSeed(pattern);
+
+                rhythmSeq = { |weight|
                     Array.fill(16, { [ 0, amp ].wchoose([1 - weight, weight]) });
                 };
-                thisThread.randSeed = seed;
+
                 if (pseqWeight > 0) {
                     var seq1 = Pseq(rhythmSeq.(rhythmWeight), 1);
                     var seq2 = Pseq(rhythmSeq.(rhythmWeight + 0.1), 1);
+
                     [Pwrand([seq1, seq2], [1 - pseqWeight, pseqWeight])];
                 } {
                     rhythmSeq.(weight);
@@ -88,7 +109,9 @@ Px {
             var getInvertBeat = { |beatAmp, invertAmp = 1|
                 var invertBeat = beatAmp.iter.loop.nextN(steps).linlin(0, amp, amp, Rest());
                 var weight = pattern[\weight] ?? 1;
-                thisThread.randSeed = this.prGetPatternSeed(pattern);
+
+                thisThread.randSeed = this.prGetPatternSeed(pattern, name);
+
                 invertBeat.collect { |step|
                     if (step == amp) {
                         step = [0, amp].wchoose([1 - weight, weight]);
@@ -96,12 +119,15 @@ Px {
                     step;
                 };
             };
+
             var getTotalBeat = { |invertBeat|
                 var beat = pattern[\totalBeat] ?? Array.fill(steps, 0);
                 (beat + invertBeat).collect { |step| step.clip(0, 1) };
             };
+
             var invertBeat = getInvertBeat.(patterns[i - 1][\amp], pattern[\amp]);
             var totalBeat = getTotalBeat.(invertBeat);
+
             patterns[i].putAll([\totalBeat, totalBeat]);
             totalBeat;
         };
@@ -109,15 +135,20 @@ Px {
         var createPatternAmp = { |pattern, i|
             var amp = pattern[\amp] ?? pattern[\a] ?? 1;
             pattern.removeAt(\a);
+
             if (pattern[\beat].notNil) {
                 amp = createPatternBeat.(amp, pattern);
             };
+
             if (pattern[\fill].notNil) {
                 amp = createPatternFillFromBeat.(amp, i, pattern);
             };
+
             pattern[\dur] = createPatternBeatRest.(pattern);
+
             if (amp.isArray)
             { amp = Pseq(amp, inf) };
+
             pattern[\amp] = amp;
             pattern;
         };
@@ -127,6 +158,7 @@ Px {
                 var delay = pattern[\human] * 0.04;
                 pattern[\lag] = Pwhite(delay.neg, delay);
             };
+
             pattern;
         };
 
@@ -200,7 +232,7 @@ Px {
         pDef = Pdef(name.asSymbol, Ptpar(ptparList)).quant_(quant ?? 4);
 
         if (nodeProxy[name].isPlaying.not) {
-            nodeProxy.add(name -> Ndef(name, pDef).play);
+            nodeProxy.add(name -> Ndef(name, pDef));
         };
     }
 
@@ -236,12 +268,6 @@ Px {
         chorusPatterns[name] = lastPatterns[name ?? lastName];
     }
 
-    *shuffle { |name|
-        name = name ?? lastName;
-        this.prCreateNewSeeds;
-        this.prSend(lastPatterns[name], name);
-    }
-
     *stop { |name|
         name = name ?? lastName;
         nodeProxy[name].free;
@@ -269,40 +295,10 @@ Px {
         nodeProxy[name].vol_(value);
     }
 
-    *prCreateNewSeeds {
-        seeds.order do: { |id|
-            var newSeed = (Date.getDate.rawSeconds % 1000).rand.asInteger;
-            this.prPrint("🎲 Shuffle:".scatArgs(id, "->", newSeed));
-            seeds[id] = newSeed;
-        };
-    }
-
-    *prGenerateRandNumber { |id|
-        var seed = 1000.rand;
-        this.prPrint("🎲 Seed:".scatArgs(id, "->", seed));
-        ^seed;
-    }
-
     *prGetName { | name |
         name = name ?? this.name.asString.toLower.asSymbol;
         lastName = name;
         ^name;
-    }
-
-    *prGetPatternSeed { |pattern|
-        var id = pattern[\id].asSymbol;
-        if (pattern[\seed].isNil) {
-            var seed;
-
-            if (seeds[id].isNil)
-            { seed = this.prGenerateRandNumber(id) }
-            { seed = seeds[id] };
-
-            seeds.add(id -> seed);
-            ^seeds[id];
-        } {
-            ^pattern[\seed];
-        };
     }
 
     *prSend { |patterns, name, quant, trace|
